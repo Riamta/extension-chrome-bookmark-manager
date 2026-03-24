@@ -15,14 +15,13 @@ import {
   updateSettings,
 } from './storage';
 import { COLLECTION, type AppState, type Bookmark, type Collection } from './types';
-import { generateId, getDomain, getFavicon } from './utils';
+import { canFetchPreview, generateId, getDomain, getFavicon, isSafeBookmarkUrl, sanitizeBookmarkUrl } from './utils';
 import { getAiSummary } from './ai';
 
 
 
 async function fetchLinkPreview(url: string): Promise<string | undefined> {
-  // Chrome strictly prevents extensions from `fetch`ing against chrome:// and chrome.google.com (Web Store)
-  if (url.startsWith('chrome://') || url.startsWith('chrome-extension://') || url.includes('chrome.google.com')) {
+  if (!canFetchPreview(url)) {
     return undefined;
   }
 
@@ -106,7 +105,10 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId !== 'bm-save-page') return;
 
-  const url = info.linkUrl ?? info.pageUrl ?? tab?.url ?? '';
+  const rawUrl = info.linkUrl ?? info.pageUrl ?? tab?.url ?? '';
+  const url = sanitizeBookmarkUrl(rawUrl);
+  if (!url) return;
+
   let title = info.linkUrl ? getDomain(info.linkUrl) : (tab?.title ?? '');
   const favicon = getFavicon(url);
 
@@ -184,16 +186,23 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
         case 'BM:addBookmark': {
           const payload = message.payload as Omit<Bookmark, 'id' | 'createdAt' | 'updatedAt' | 'coverUrl' | 'pinned'>;
-          const coverUrl = await fetchLinkPreview(payload.url); // Fetch cover image
-          
+          const safeUrl = sanitizeBookmarkUrl(payload.url);
+          if (!safeUrl) {
+            sendResponse({ error: 'Invalid or unsupported bookmark URL' });
+            break;
+          }
+
+          const coverUrl = await fetchLinkPreview(safeUrl);
+
           const bookmark: Bookmark = {
             ...payload,
+            url: safeUrl,
             id: generateId(),
-            tags: Array.from(new Set(payload.tags)),
+            tags: Array.from(new Set((payload.tags || []).map((tag) => String(tag).trim().toLowerCase()).filter(Boolean))),
             createdAt: Date.now(),
             updatedAt: Date.now(),
-            coverUrl, // Add coverUrl
-            pinned: false, // Add pinned status
+            coverUrl,
+            pinned: false,
           };
           await addBookmark(bookmark);
           sendResponse(await getState());
@@ -202,7 +211,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
         case 'BM:updateBookmark': {
           const payload = message.payload as Bookmark;
-          await updateBookmark({ ...payload, updatedAt: Date.now() });
+          const safeUrl = sanitizeBookmarkUrl(payload.url);
+          if (!safeUrl) {
+            sendResponse({ error: 'Invalid or unsupported bookmark URL' });
+            break;
+          }
+
+          await updateBookmark({
+            ...payload,
+            url: safeUrl,
+            tags: Array.from(new Set((payload.tags || []).map((tag) => String(tag).trim().toLowerCase()).filter(Boolean))),
+            updatedAt: Date.now()
+          });
           sendResponse(await getState());
           break;
         }
@@ -310,19 +330,49 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           const { bookmarks, collections } = message.payload as { bookmarks: Bookmark[], collections: Collection[] };
           const existingBms = await getBookmarks();
           const existingCols = await getCollections();
-          
+
+          const sanitizedBookmarks = (Array.isArray(bookmarks) ? bookmarks : [])
+            .map((bookmark) => {
+              const safeUrl = sanitizeBookmarkUrl(bookmark?.url || '');
+              if (!safeUrl || typeof bookmark?.id !== 'string') {
+                return null;
+              }
+
+              return {
+                ...bookmark,
+                url: safeUrl,
+                title: typeof bookmark.title === 'string' ? bookmark.title : getDomain(safeUrl),
+                favicon: typeof bookmark.favicon === 'string' ? bookmark.favicon : getFavicon(safeUrl),
+                tags: Array.from(new Set((Array.isArray(bookmark.tags) ? bookmark.tags : []).map((tag) => String(tag).trim().toLowerCase()).filter(Boolean))),
+                note: typeof bookmark.note === 'string' ? bookmark.note : undefined,
+                collectionId: typeof bookmark.collectionId === 'string' ? bookmark.collectionId : COLLECTION.UNSORTED,
+                createdAt: typeof bookmark.createdAt === 'number' ? bookmark.createdAt : Date.now(),
+                updatedAt: typeof bookmark.updatedAt === 'number' ? bookmark.updatedAt : Date.now(),
+                pinned: Boolean(bookmark.pinned),
+                coverUrl: typeof bookmark.coverUrl === 'string' && isSafeBookmarkUrl(bookmark.coverUrl) ? bookmark.coverUrl : undefined,
+              };
+            })
+            .filter(Boolean);
+
+          const sanitizedCollections = (Array.isArray(collections) ? collections : [])
+            .filter((collection) => collection && typeof collection.id === 'string' && typeof collection.name === 'string')
+            .map((collection) => ({
+              ...collection,
+              parentId: typeof collection.parentId === 'string' ? collection.parentId : undefined,
+            }));
+
           const newBms = [...existingBms];
-          for (const b of bookmarks) {
+          for (const b of sanitizedBookmarks) {
             const idx = newBms.findIndex(x => x.id === b.id);
             if (idx >= 0) newBms[idx] = b; else newBms.push(b);
           }
-          
+
           const newCols = [...existingCols];
-          for (const c of collections) {
+          for (const c of sanitizedCollections) {
             const idx = newCols.findIndex(x => x.id === c.id);
             if (idx >= 0) newCols[idx] = c; else newCols.push(c);
           }
-          
+
           await saveBookmarks(newBms);
           await saveCollections(newCols);
           sendResponse(await getState());

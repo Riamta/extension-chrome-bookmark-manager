@@ -1,6 +1,52 @@
 import type { Collection } from './types';
 
-// ─── URL Helpers ──────────────────────────────────────────────────────────────
+// --- URL Helpers --------------------------------------------------------------
+
+const ALLOWED_PROTOCOLS = new Set(['http:', 'https:']);
+const PRIVATE_HOST_PATTERNS = [
+  /^localhost$/i,
+  /^127\./,
+  /^10\./,
+  /^192\.168\./,
+  /^169\.254\./,
+  /^172\.(1[6-9]|2\d|3[0-1])\./,
+  /^::1$/i,
+  /^fc/i,
+  /^fd/i,
+  /^fe80:/i,
+];
+
+function parseUrl(url: string): URL | null {
+  try {
+    return new URL(url);
+  } catch {
+    return null;
+  }
+}
+
+export function isSafeBookmarkUrl(url: string): boolean {
+  const parsed = parseUrl(url);
+  return !!parsed && ALLOWED_PROTOCOLS.has(parsed.protocol);
+}
+
+export function canFetchPreview(url: string): boolean {
+  const parsed = parseUrl(url);
+  if (!parsed || !ALLOWED_PROTOCOLS.has(parsed.protocol)) {
+    return false;
+  }
+
+  const hostname = parsed.hostname.trim();
+  if (!hostname) {
+    return false;
+  }
+
+  return !PRIVATE_HOST_PATTERNS.some((pattern) => pattern.test(hostname));
+}
+
+export function sanitizeBookmarkUrl(url: string): string | null {
+  const trimmed = url.trim();
+  return isSafeBookmarkUrl(trimmed) ? trimmed : null;
+}
 
 export function getDomain(url: string): string {
   try {
@@ -19,7 +65,7 @@ export function getFavicon(url: string): string {
   }
 }
 
-// ─── Date Helpers ─────────────────────────────────────────────────────────────
+// --- Date Helpers -------------------------------------------------------------
 
 export function formatRelativeDate(ts: number): string {
   const diff = Date.now() - ts;
@@ -35,13 +81,13 @@ export function formatRelativeDate(ts: number): string {
   return new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-// ─── ID Generator ─────────────────────────────────────────────────────────────
+// --- ID Generator -------------------------------------------------------------
 
 export function generateId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
-// ─── Tag parsing ──────────────────────────────────────────────────────────────
+// --- Tag parsing --------------------------------------------------------------
 
 export function parseTags(input: string): string[] {
   return input
@@ -50,7 +96,7 @@ export function parseTags(input: string): string[] {
     .filter(Boolean);
 }
 
-// ─── Collection Hierarchy ─────────────────────────────────────────────────────
+// --- Collection Hierarchy -----------------------------------------------------
 
 export interface CollectionNode extends Collection {
   children: CollectionNode[];
